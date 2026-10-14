@@ -1,0 +1,128 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function docPath(col, id) { return /databases/$(database)/documents/$(col)/$(id); }
+    function isAdmin() { return signedIn() && exists(docPath('admins', request.auth.uid)); }
+    function isWorker() {
+      return signedIn()
+        && exists(docPath('workers', request.auth.uid))
+        && get(docPath('workers', request.auth.uid)).data.active == true;
+    }
+    function myStore() { return get(docPath('workers', request.auth.uid)).data.storeId; }
+    function dataCollection(c) {
+      return c in ['incomes', 'expenses', 'debts', 'payments', 'supportRequests', 'suppliers', 'supplierTransactions'];
+    }
+    function amountOk(d) { return d.amount is number && d.amount > 0; }
+
+    // رصيد الدين دائمًا متسق: المتبقي = الإجمالي − المسدد، والحالة تتبعهما (يمنع التعديل اليدوي غير المنطقي)
+    function debtBalanceOk(d) {
+      return d.amount is number && d.amount > 0
+        && d.paidAmount is number && d.paidAmount >= 0 && d.paidAmount <= d.amount
+        && d.remainingAmount == d.amount - d.paidAmount
+        && d.status == (d.remainingAmount == 0 ? 'paid' : (d.paidAmount == 0 ? 'unpaid' : 'partial'));
+    }
+    // السداد الجديد يجب أن يشير إلى دين موجود في المتجر نفسه ولا يتجاوز متبقيه
+    function debtLinkOk(d) {
+      return d.debtId is string
+        && exists(docPath('debts', d.debtId))
+        && get(docPath('debts', d.debtId)).data.storeId == d.storeId
+        && d.amount <= get(docPath('debts', d.debtId)).data.remainingAmount;
+    }
+    // نافذة الدخل بوقت الخادم (request.time بتوقيت UTC) مع فرق توقيت المتجر المخزَّن tzOffsetMin
+    function incomeWindowOk() {
+      let st = get(docPath('stores', myStore())).data;
+      let a = st.get('incomeStart', '');
+      let b = st.get('incomeEnd', '');
+      let now = (request.time.hours() * 60 + request.time.minutes() + st.get('tzOffsetMin', 60) + 1440) % 1440;
+      return a == '' || b == '' || (
+        (int(a[0:2]) * 60 + int(a[3:5]) <= int(b[0:2]) * 60 + int(b[3:5]))
+          ? (now >= int(a[0:2]) * 60 + int(a[3:5]) && now < int(b[0:2]) * 60 + int(b[3:5]))
+          : (now >= int(a[0:2]) * 60 + int(a[3:5]) || now < int(b[0:2]) * 60 + int(b[3:5]))
+      );
+    }
+    // تاريخ الدخل يجب أن يقع قرب تاريخ الخادم (±3 أيام تتحمل العمل دون اتصال) فلا يُحجز يوم مستقبلي ولا يُختلق يوم قديم
+    function dateNear(s) {
+      return s.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && timestamp.date(int(s[0:4]), int(s[5:7]), int(s[8:10])) >= request.time - duration.value(3, 'd')
+        && timestamp.date(int(s[0:4]), int(s[5:7]), int(s[8:10])) <= request.time + duration.value(3, 'd');
+    }
+    // ما يستطيع العامل إنشاءه، وبأي شكل: قيم ابتدائية فقط (لا يؤكد سدادًا ولا يضبط رصيد دين)
+    function workerPayloadOk(c, id, d) {
+      return d.storeId == myStore() && d.workerId == request.auth.uid && (
+        (c == 'incomes' && amountOk(d) && d.date is string && dateNear(d.date) && id == d.storeId + '_' + d.date && incomeWindowOk())
+        || (c == 'expenses' && amountOk(d))
+        || (c == 'debts' && amountOk(d) && d.type in ['receivable', 'payable']
+            && d.status == 'unpaid' && d.paidAmount == 0 && d.remainingAmount == d.amount)
+        || (c == 'payments' && amountOk(d) && d.status == 'pending' && debtLinkOk(d))
+        || (c == 'supportRequests' && d.status == 'new' && d.senderUid == request.auth.uid)
+      );
+    }
+
+    // الأدمن: حساب واحد فقط، يُنشأ مرة واحدة قبل وجود meta/setup
+    match /admins/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create: if signedIn() && request.auth.uid == uid
+                    && !exists(docPath('meta', 'setup'));
+    }
+    // PIN إظهار نموذج الأدمن (مُجزَّأ). قراءته مفتوحة لأن شاشة الدخول تسبق المصادقة؛ الكتابة للأدمن فقط
+    match /meta/gate {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    // أجهزة يظهر عليها فورم الأدمن: الجهاز يقرأ مستنده بمعرّفه العشوائي فقط (get)، والقائمة والكتابة للأدمن
+    match /adminDevices/{deviceId} {
+      allow get: if true;
+      allow list, write: if isAdmin();
+    }
+    match /meta/setup {
+      allow read: if signedIn();
+      allow create: if signedIn() && !exists(docPath('meta', 'setup'));
+    }
+
+    // سجل التدقيق: الأدمن يضيف ويقرأ فقط، ولا تعديل ولا حذف لأي مدخل
+    match /auditLog/{entryId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && request.resource.data.byUid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /stores/{sid} {
+      allow read: if isAdmin() || (isWorker() && myStore() == sid);
+      allow write: if isAdmin();
+    }
+
+    match /workers/{uid} {
+      allow read: if isAdmin() || (signedIn() && request.auth.uid == uid);
+      allow write: if isAdmin();
+      // العامل يسجّل آخر دخول له فقط، ولا يعدّل أي حقل آخر في ملفه
+      allow update: if signedIn() && request.auth.uid == uid
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastLoginAt']);
+    }
+
+    // كل سجلات العمل مرتبطة بمتجر عبر storeId
+    match /{col}/{id} {
+      allow read: if dataCollection(col) && (
+        isAdmin()
+        || (isWorker() && resource.data.storeId == myStore()
+            && (col != 'supportRequests' || resource.data.senderUid == request.auth.uid)
+            && col != 'suppliers' && col != 'supplierTransactions')
+      );
+      allow create: if dataCollection(col) && (
+        isAdmin()
+        || (isWorker() && workerPayloadOk(col, id, request.resource.data))
+      );
+      // السداد المؤكد لا يُعدَّل ولا يُحذف؛ التأكيد نفسه يتم من الأدمن (pending -> confirmed) داخل Transaction
+      // التحويل إلى confirmed لا يتم إلا عبر Transaction التأكيد (تضع confirmedBy)؛ التعديل اليدوي مرفوض
+      allow update: if dataCollection(col) && isAdmin()
+                    && (col != 'payments' || !('storeId' in resource.data)
+                        || (resource.data.status == 'pending'
+                            && (request.resource.data.status != 'confirmed'
+                                || request.resource.data.confirmedBy == request.auth.uid)))
+                    && (col != 'debts' || !('storeId' in resource.data) || debtBalanceOk(request.resource.data));
+      allow delete: if dataCollection(col) && isAdmin()
+                    && (col != 'payments' || resource.data.status != 'confirmed');
+    }
+  }
+}

@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+}
+:root { --ink: #182620; --ink-soft: #4F5F56; }
+
+
+/* ---------- Refined motion & compact admin chrome ---------- */
+:root { scroll-behavior: smooth; }
+
+.ui-card {
+  transition: transform .22s cubic-bezier(.2,.8,.2,1), box-shadow .22s ease, border-color .22s ease;
+}
+.ui-card { box-shadow: var(--card-shadow, none); }
+.ui-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--card-shadow-hover, none);
+}
+.ui-button {
+  transition: transform .18s ease, box-shadow .2s ease, opacity .2s ease, background-color .2s ease;
+}
+.ui-button { box-shadow: var(--btn-shadow, none); }
+.ui-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: var(--btn-shadow-hover, none);
+}
+.ui-button:active:not(:disabled) { transform: scale(.975); }
+
+.admin-page-enter {
+  animation: adminPageIn .28s cubic-bezier(.2,.8,.2,1) both;
+}
+@keyframes adminPageIn {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---------- Natural mobile interaction ---------- */
+button, a, input, textarea, select { -webkit-tap-highlight-color: transparent; }
+button, a { touch-action: manipulation; }
+button:focus-visible, a:focus-visible { outline: 3px solid rgba(184,147,58,.35); outline-offset: 2px; }
+.ui-card { will-change: transform; }
+.ui-button { will-change: transform; }
+.ui-button:active:not(:disabled) { transition-duration: .08s; }
+
+/* smoother modal entrance */
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(18px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.fixed.inset-0.z-50 > div { animation: modalIn .22s cubic-bezier(.2,.8,.2,1) both; }
+
+
+/* ---------- Dark mode: عناصر النظام (قوائم، تقويم، أشرطة تمرير) + خلفية الصفحة ---------- */
+html, body { background: var(--app-bg, #F6F3EC); background-attachment: fixed; }
+[data-theme-mode="dark"] { color-scheme: dark; }
+[data-theme-mode="dark"] input::placeholder, [data-theme-mode="dark"] textarea::placeholder { color: #7F8E87; opacity: 1; }
+
+
+/* ---------- بطاقة الفترة القابلة للتوسيع: حركة الارتفاع بتحويل الصفوف 0fr ← 1fr (بلا قياس بالجافاسكربت ولا اهتزاز) ---------- */
+.period-body { display: grid; grid-template-rows: 0fr; opacity: 0; visibility: hidden; transition: grid-template-rows .28s cubic-bezier(.2,.8,.2,1), opacity .2s ease, visibility 0s linear .28s; }
+.period-body[data-open="1"] { grid-template-rows: 1fr; opacity: 1; visibility: visible; transition: grid-template-rows .28s cubic-bezier(.2,.8,.2,1), opacity .24s ease .04s, visibility 0s; }
+.period-body-inner { overflow: hidden; min-height: 0; margin: 0 -6px; padding: 0 6px 8px; }
