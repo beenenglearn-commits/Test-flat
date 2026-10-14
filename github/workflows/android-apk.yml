@@ -1,0 +1,106 @@
+name: Build Android APK (signed release)
+
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "release notes"
+        required: false
+        default: "update"
+
+env:
+  HAS_FIREBASE: ${{ secrets.FIREBASE_APP_ID != '' && secrets.FIREBASE_SERVICE_ACCOUNT != '' }}
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check signing secrets
+        env:
+          KS: ${{ secrets.KEYSTORE_BASE64 }}
+          KP: ${{ secrets.KEYSTORE_PASSWORD }}
+          KA: ${{ secrets.KEY_ALIAS }}
+        run: |
+          if [ -z "$KS" ] || [ -z "$KP" ] || [ -z "$KA" ]; then
+            echo "::error::Signing secrets are missing. Run Create signing key once, then add KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS."
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm install
+      - name: Build web app
+        run: npm run build
+      - name: Add Android platform
+        run: npx cap add android
+      - name: Add camera and biometric permissions
+        run: |
+          sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#&\n    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.USE_BIOMETRIC" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />#' android/app/src/main/AndroidManifest.xml
+          grep -n "CAMERA" android/app/src/main/AndroidManifest.xml
+
+      - name: Set version
+        run: |
+          BASE=$(node -p "require('./package.json').version")
+          CODE=${{ github.run_number }}
+          NAME="$BASE.$CODE"
+          sed -i -E "s/versionCode [0-9]+/versionCode $CODE/; s/versionName \"[^\"]*\"/versionName \"$NAME\"/" android/app/build.gradle
+          grep -n "versionCode\|versionName" android/app/build.gradle
+          grep -q "versionCode $CODE" android/app/build.gradle || { echo "::error::versionCode not set"; exit 1; }
+          echo "VERSION_NAME=$NAME" >> $GITHUB_ENV
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build release APK (unsigned)
+        working-directory: android
+        run: ./gradlew assembleRelease
+
+      - name: Sign APK
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -e
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/daftar.jks"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          UNSIGNED=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
+          mkdir -p out
+          "$BT/zipalign" -p -f 4 "$UNSIGNED" out/aligned.apk
+          "$BT/apksigner" sign --ks "$RUNNER_TEMP/daftar.jks" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass pass:"$KS_PASS" --key-pass pass:"${KEY_PASS:-$KS_PASS}" \
+            --out "out/daftar-$VERSION_NAME.apk" out/aligned.apk
+          "$BT/apksigner" verify --print-certs "out/daftar-$VERSION_NAME.apk" | tee out/cert.txt
+          grep "SHA-256" out/cert.txt || true
+          rm -f "$RUNNER_TEMP/daftar.jks" out/aligned.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: daftar-release-${{ env.VERSION_NAME }}
+          path: out/daftar-${{ env.VERSION_NAME }}.apk
+
+      - name: Distribute to workers (Firebase App Distribution)
+        if: ${{ env.HAS_FIREBASE == 'true' }}
+        uses: wzieba/Firebase-Distribution-Github-Action@v1
+        with:
+          appId: ${{ secrets.FIREBASE_APP_ID }}
+          serviceCredentialsFileContent: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          groups: workers
+          file: out/daftar-${{ env.VERSION_NAME }}.apk
+          releaseNotes: ${{ github.event.inputs.notes }}
